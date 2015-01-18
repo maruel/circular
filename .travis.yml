@@ -1,0 +1,16 @@
+# Install with:
+# cp git-hooks-go/sample.travis.yml .travis.yml
+#
+# travis-ci.org does *not* support .travis.yml to be a symlink!
+
+sudo: false
+language: go
+
+go:
+- 1.4
+
+before_install:
+  - python git-hooks-go/install_prerequisites.py
+
+script:
+  - ./presubmit.py
