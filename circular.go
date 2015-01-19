@@ -4,11 +4,12 @@
 
 // Package circular implements an efficient thread-safe circular byte buffer to
 // keep in-memory logs. It implements both io.Writer and io.WriterTo.
+//
+// It carries a minimal set of dependencies.
 package circular
 
 import (
 	"io"
-	"net/http"
 	"sync"
 )
 
@@ -18,6 +19,10 @@ import (
 //
 // No allocation while writing to it. Independent readers each have their read
 // position and are synchronized with the writer to not have any data loss.
+//
+// BUG: Use range-lock instead of locking the whole buffer. This will permits
+// blocking-less writes when readers are keeping up with the writer, that is,
+// when the readers throughput is equal or larger to the writer throughput.
 type Buffer struct {
 	wgReaders        sync.WaitGroup // number of readers active.
 	wgReadersWaiting sync.WaitGroup // number of readers waiting for new data.
@@ -26,7 +31,7 @@ type Buffer struct {
 	newData          *sync.Cond     // used to unblock readers all at once.
 	buf              []byte         //
 	closed           bool           // set to true by Close().
-	bytesWritten     int            // total bytes written.
+	bytesWritten     int64          // total bytes written.
 }
 
 // MakeBuffer returns an initialized Buffer.
@@ -48,7 +53,7 @@ func MakeBuffer(size int) *Buffer {
 // keep Write() performant, ensure the internal buffer is significantly larger
 // than the largest writes.
 func (b *Buffer) Write(p []byte) (int, error) {
-	s := len(b.buf)
+	s := int64(len(b.buf))
 	if s == 0 {
 		// Wasn't instantiated with MakeBuffer().
 		return 0, io.ErrClosedPipe
@@ -60,7 +65,7 @@ func (b *Buffer) Write(p []byte) (int, error) {
 		return 0, io.ErrClosedPipe
 	}
 	originalbytesWritten := b.bytesWritten
-	for chunkSize := len(p); chunkSize != 0; chunkSize = len(p) {
+	for chunkSize := int64(len(p)); chunkSize != 0; chunkSize = int64(len(p)) {
 		writeOffset := b.bytesWritten % s
 		if chunkSize > s-writeOffset {
 			chunkSize = s - writeOffset
@@ -72,10 +77,12 @@ func (b *Buffer) Write(p []byte) (int, error) {
 		b.wakeAllReaders()
 
 		if b.closed {
-			return b.bytesWritten - originalbytesWritten, io.ErrClosedPipe
+			// BUG: Could overflow on 32 bits platforms.
+			return int(b.bytesWritten - originalbytesWritten), io.ErrClosedPipe
 		}
 	}
-	return b.bytesWritten - originalbytesWritten, nil
+	// BUG: Could overflow on 32 bits platforms.
+	return int(b.bytesWritten - originalbytesWritten), nil
 }
 
 // Close implements io.Closer. It closes all WriteTo() streamers synchronously.
@@ -111,6 +118,12 @@ func (b *Buffer) wakeAllReaders() {
 	b.lock.Lock()
 }
 
+// flusher is the equivalent of http.Flusher. Importing net/http is quite
+// heavy, so it's not worth importing it just for this interface.
+type flusher interface {
+	Flush()
+}
+
 // WriteTo implements io.WriterTo. It streams a Buffer to a io.Writer until
 // the Buffer is closed. It forcibly flushes the output if w supports
 // http.Flusher so it is sent to the underlying TCP connection as data is
@@ -119,10 +132,10 @@ func (b *Buffer) WriteTo(w io.Writer) (int, error) {
 	b.wgReaders.Add(1)
 	defer b.wgReaders.Done()
 
-	f, _ := w.(http.Flusher)
-	s := len(b.buf)
+	f, _ := w.(flusher)
+	s := int64(len(b.buf))
 	var err error
-	readOffset := 0
+	readOffset := int64(0)
 
 	b.lock.RLock()
 
@@ -147,7 +160,7 @@ func (b *Buffer) WriteTo(w io.Writer) (int, error) {
 			wgFlushing.Wait()
 			var n int
 			n, err = w.Write(b.buf[off:end])
-			readOffset += n
+			readOffset += int64(n)
 			wrote = n != 0
 			if n == 0 {
 				break
@@ -174,5 +187,6 @@ func (b *Buffer) WriteTo(w io.Writer) (int, error) {
 		err = io.EOF
 	}
 	wgFlushing.Wait()
-	return readOffset - originalReadOffset, err
+	// BUG: Could overflow on 32 bits platforms.
+	return int(readOffset - originalReadOffset), err
 }

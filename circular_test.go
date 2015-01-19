@@ -37,7 +37,7 @@ func TestBufferInternalState(t *testing.T) {
 		writeOk(t, b, item.written)
 		bytesWritten += len(item.written)
 		ut.AssertEqualIndex(t, i, item.buf, string(b.buf))
-		ut.AssertEqualIndex(t, i, bytesWritten, b.bytesWritten)
+		ut.AssertEqualIndex(t, i, int64(bytesWritten), b.bytesWritten)
 	}
 }
 
