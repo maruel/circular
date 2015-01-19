@@ -16,6 +16,3 @@ Features
   - Full concurrent streaming (reading) support via multiple readers.
   - Automatically lock-less flushes for writers supporting http.Flusher.
   - Full test coverage.
-
-It still has potentially data loss on writes faster than readers. Will be fixed
-in follow up. See BUG in documentation.
