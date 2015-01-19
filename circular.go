@@ -112,7 +112,7 @@ func (b *Buffer) wakeAllReaders() {
 }
 
 // WriteTo implements io.WriterTo. It streams a Buffer to a io.Writer until
-// the Buffer is clsoed. It forcibly flushes the output if w supports
+// the Buffer is closed. It forcibly flushes the output if w supports
 // http.Flusher so it is sent to the underlying TCP connection as data is
 // appended.
 func (b *Buffer) WriteTo(w io.Writer) (int, error) {
