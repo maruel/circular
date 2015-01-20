@@ -56,11 +56,7 @@ func MakeBuffer(size int) *Buffer {
 // than the largest writes.
 func (b *Buffer) Write(p []byte) (int, error) {
 	s := int64(len(b.buf))
-	if s == 0 {
-		// Wasn't instantiated with MakeBuffer().
-		return 0, io.ErrClosedPipe
-	}
-	if atomic.LoadInt32(&b.closed) != 0 {
+	if s == 0 || atomic.LoadInt32(&b.closed) != 0 {
 		return 0, io.ErrClosedPipe
 	}
 
@@ -90,7 +86,7 @@ func (b *Buffer) Write(p []byte) (int, error) {
 // Close implements io.Closer. It closes all WriteTo() streamers synchronously
 // and blocks until they all quit.
 func (b *Buffer) Close() error {
-	if !atomic.CompareAndSwapInt32(&b.closed, 0, 1) {
+	if len(b.buf) == 0 || !atomic.CompareAndSwapInt32(&b.closed, 0, 1) {
 		return io.ErrClosedPipe
 	}
 	b.newData.Broadcast()
@@ -121,6 +117,10 @@ type flusher interface {
 // http.Flusher so it is sent to the underlying TCP connection as data is
 // appended.
 func (b *Buffer) WriteTo(w io.Writer) (int, error) {
+	if len(b.buf) == 0 || atomic.LoadInt32(&b.closed) != 0 {
+		return 0, io.ErrClosedPipe
+	}
+
 	b.wgReaders.Add(1)
 	defer b.wgReaders.Done()
 

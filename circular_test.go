@@ -60,6 +60,10 @@ func TestBufferDidntUseMakeBuffer(t *testing.T) {
 	n, err := b.Write([]byte("foo"))
 	ut.AssertEqual(t, 0, n)
 	ut.AssertEqual(t, io.ErrClosedPipe, err)
+	n, err = b.WriteTo(&bytes.Buffer{})
+	ut.AssertEqual(t, 0, n)
+	ut.AssertEqual(t, io.ErrClosedPipe, err)
+	ut.AssertEqual(t, io.ErrClosedPipe, b.Close())
 }
 
 func TestBufferEOF(t *testing.T) {
