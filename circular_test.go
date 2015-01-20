@@ -7,7 +7,6 @@ package circular
 import (
 	"bytes"
 	"errors"
-	"fmt"
 	"io"
 	"sync"
 	"testing"
@@ -262,7 +261,6 @@ type hookWriter struct {
 }
 
 func (h *hookWriter) Write(p []byte) (int, error) {
-	fmt.Printf("hookWriter.Write()\n")
 	h.f[0]()
 	h.f = h.f[1:]
 	return h.buf.Write(p)

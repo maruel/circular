@@ -11,6 +11,7 @@ package circular
 import (
 	"io"
 	"sync"
+	"sync/atomic"
 )
 
 // Buffer is designed to keep recent logs in-memory efficiently and in a
@@ -20,17 +21,18 @@ import (
 // No allocation while writing to it. Independent readers each have their read
 // position and are synchronized with the writer to not have any data loss.
 //
-// BUG: Use range-lock instead of locking the whole buffer. This will permits
-// blocking-less writes when readers are keeping up with the writer, that is,
-// when the readers throughput is equal or larger to the writer throughput.
+// BUG(maruel): Use range-lock instead of locking the whole buffer. This will
+// permits blocking-less writes when readers are keeping up with the writer,
+// that is, when the readers throughput is equal or larger to the writer
+// throughput.
 type Buffer struct {
+	closed           int32          // set to 1 by Close() via atomic.
 	wgReaders        sync.WaitGroup // number of readers active.
 	wgReadersWaiting sync.WaitGroup // number of readers waiting for new data.
 	wgWriterDone     sync.WaitGroup // safe for readers to get back asleep.
-	lock             sync.RWMutex   //
+	lock             sync.RWMutex   // lock controls the following members.
 	newData          *sync.Cond     // used to unblock readers all at once.
-	buf              []byte         //
-	closed           bool           // set to true by Close().
+	buf              []byte         // the data itself.
 	bytesWritten     int64          // total bytes written.
 }
 
@@ -58,12 +60,12 @@ func (b *Buffer) Write(p []byte) (int, error) {
 		// Wasn't instantiated with MakeBuffer().
 		return 0, io.ErrClosedPipe
 	}
+	if atomic.LoadInt32(&b.closed) != 0 {
+		return 0, io.ErrClosedPipe
+	}
 
 	b.lock.Lock()
 	defer b.lock.Unlock()
-	if b.closed {
-		return 0, io.ErrClosedPipe
-	}
 	originalbytesWritten := b.bytesWritten
 	for chunkSize := int64(len(p)); chunkSize != 0; chunkSize = int64(len(p)) {
 		writeOffset := b.bytesWritten % s
@@ -76,36 +78,26 @@ func (b *Buffer) Write(p []byte) (int, error) {
 
 		b.wakeAllReaders()
 
-		if b.closed {
-			// BUG: Could overflow on 32 bits platforms.
+		if atomic.LoadInt32(&b.closed) != 0 {
+			// BUG(maruel): Could overflow on 32 bits platforms.
 			return int(b.bytesWritten - originalbytesWritten), io.ErrClosedPipe
 		}
 	}
-	// BUG: Could overflow on 32 bits platforms.
+	// BUG(maruel): Could overflow on 32 bits platforms.
 	return int(b.bytesWritten - originalbytesWritten), nil
 }
 
-// Close implements io.Closer. It closes all WriteTo() streamers synchronously.
+// Close implements io.Closer. It closes all WriteTo() streamers synchronously
+// and blocks until they all quit.
 func (b *Buffer) Close() error {
-	inner := func() error {
-		b.lock.Lock()
-		defer b.lock.Unlock()
-		if b.closed {
-			return io.ErrClosedPipe
-		}
-		// There could be a Write() function underway. Make sure it's properly
-		// awaken.
-		b.closed = true
-
-		b.wakeAllReaders()
-
-		return nil
+	if !atomic.CompareAndSwapInt32(&b.closed, 0, 1) {
+		return io.ErrClosedPipe
 	}
-
-	err := inner()
+	b.newData.Broadcast()
+	b.wgReadersWaiting.Wait()
 	// Wait for all readers to be done.
 	b.wgReaders.Wait()
-	return err
+	return nil
 }
 
 func (b *Buffer) wakeAllReaders() {
@@ -148,7 +140,7 @@ func (b *Buffer) WriteTo(w io.Writer) (int, error) {
 	// One of the important property is that when the Buffer is quickly written
 	// to then closed, the remaining data is still sent to all readers.
 	var wgFlushing sync.WaitGroup
-	for (!b.closed || readOffset != b.bytesWritten) && err == nil {
+	for (atomic.LoadInt32(&b.closed) == 0 || readOffset != b.bytesWritten) && err == nil {
 		wrote := false
 		for readOffset < b.bytesWritten && err == nil {
 			off := readOffset % s
@@ -187,6 +179,6 @@ func (b *Buffer) WriteTo(w io.Writer) (int, error) {
 		err = io.EOF
 	}
 	wgFlushing.Wait()
-	// BUG: Could overflow on 32 bits platforms.
+	// BUG(maruel): Could overflow on 32 bits platforms.
 	return int(readOffset - originalReadOffset), err
 }
