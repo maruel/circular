@@ -263,15 +263,19 @@ func (b *Buffer) WriteTo(w io.Writer) (int, error) {
 }
 
 // AutoFlush converts an io.Writer supporting http.Flusher to call Flush()
-// automatically after each write.
+// automatically after each write after a small delay.
 //
 // The main use case is http connection when piping a circular buffer to it.
-func AutoFlush(w io.Writer) io.Writer {
+func AutoFlush(w io.Writer, delay time.Duration) io.Writer {
 	f, _ := w.(flusher)
 	if f == nil {
 		return w
 	}
-	return &autoFlusher{w: w, f: f}
+	return &autoFlusher{w: w, f: f, delay: delay}
+}
+
+func AutoFlushInstant(w io.Writer) io.Writer {
+	return AutoFlush(w, time.Duration(0))
 }
 
 // Internal details.
@@ -284,31 +288,38 @@ type flusher interface {
 }
 
 type autoFlusher struct {
-	f     flusher
-	w     io.Writer
-	delay time.Time
-	wg    sync.WaitGroup
+	f            flusher
+	w            io.Writer
+	delay        time.Duration
+	lock         sync.Mutex
+	flushPending bool
 }
 
 func (a *autoFlusher) Write(p []byte) (int, error) {
 	// Never call .Write() and .Flush() concurrently.
-	a.wg.Wait()
-	a.wg.Add(1)
-	defer a.wg.Done()
+	a.lock.Lock()
 	n, err := a.w.Write(p)
-	if n != 0 {
-		a.wg.Add(1)
+	defer a.lock.Unlock()
+	if n != 0 && !a.flushPending {
+		a.flushPending = true
 		go func() {
-			defer a.wg.Done()
-			a.f.Flush()
+			if a.delay != 0 {
+				<-time.After(a.delay)
+			}
+			a.lock.Lock()
+			if a.flushPending {
+				a.f.Flush()
+				a.flushPending = false
+			}
+			a.lock.Unlock()
 		}()
 	}
 	return n, err
 }
 
 func (a *autoFlusher) Flush() {
-	a.wg.Wait()
-	a.wg.Add(1)
-	defer a.wg.Done()
+	a.lock.Lock()
+	defer a.lock.Unlock()
+	a.flushPending = false
 	a.f.Flush()
 }

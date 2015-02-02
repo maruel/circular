@@ -30,7 +30,7 @@ func TestBufferWriteClosedPipe(t *testing.T) {
 	w.hang.Add(1)
 	end.Go(func() {
 		s.Step(0)
-		n, err := b.WriteTo(AutoFlush(w))
+		n, err := b.WriteTo(AutoFlushInstant(w))
 		ut.AssertEqual(t, 10, n)
 		ut.AssertEqual(t, io.EOF, err)
 	})
@@ -56,15 +56,15 @@ func TestBufferReaderLaggard(t *testing.T) {
 	w[0].hang.Add(1)
 	end.Go(func() {
 		s.Step(0)
-		n, err := b.WriteTo(AutoFlush(&w[0]))
-		ut.AssertEqual(t, "elloWorld!", w[0].buf.String())
+		n, err := b.WriteTo(AutoFlushInstant(&w[0]))
+		ut.AssertEqual(t, "elloWorld!Overflowe", w[0].buf.String())
 		ut.AssertEqual(t, 19, n)
 		ut.AssertEqual(t, io.EOF, err)
 	})
 	end.Go(func() {
 		s.Step(1)
-		n, err := b.WriteTo(AutoFlush(&w[1]))
-		ut.AssertEqual(t, "elloWorld!", w[1].buf.String())
+		n, err := b.WriteTo(AutoFlushInstant(&w[1]))
+		ut.AssertEqual(t, "elloWorld!Overflowe", w[1].buf.String())
 		ut.AssertEqual(t, 19, n)
 		ut.AssertEqual(t, io.EOF, err)
 	})
