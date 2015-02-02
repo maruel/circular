@@ -278,7 +278,7 @@ func TestBufferFlusher(t *testing.T) {
 
 	end.Go(func() {
 		wgReady.Done()
-		n, err := b.WriteTo(w)
+		n, err := b.WriteTo(AutoFlush(w))
 		ut.AssertEqual(t, 7, n)
 		ut.AssertEqual(t, io.EOF, err)
 		ut.AssertEqual(t, "HelloHi", w.buf.String())
@@ -305,7 +305,7 @@ func TestBufferFlusherRolledOver(t *testing.T) {
 
 	end.Go(func() {
 		wgReady.Done()
-		n, err := b.WriteTo(w)
+		n, err := b.WriteTo(AutoFlush(w))
 		ut.AssertEqual(t, 25, n)
 		ut.AssertEqual(t, io.EOF, err)
 		ut.AssertEqual(t, "helloHELLOHave a nice day", w.buf.String())
@@ -422,7 +422,7 @@ func stressTest(t *testing.T, s string, maker func() io.ReadWriter) {
 		go func(j int) {
 			defer endReaders.Done()
 			wgReady.Done()
-			n, err := b.WriteTo(readers[j])
+			n, err := b.WriteTo(AutoFlush(readers[j]))
 			ut.AssertEqual(t, len(s)*len(readers), n)
 			ut.AssertEqual(t, io.EOF, err)
 		}(i)

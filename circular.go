@@ -12,6 +12,7 @@ import (
 	"io"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // Buffer is designed to keep recent logs in-memory efficiently and in a
@@ -192,7 +193,6 @@ func (b *Buffer) WriteTo(w io.Writer) (int, error) {
 	b.wgActiveReaders.Add(1)
 	defer b.wgActiveReaders.Done()
 
-	f, _ := w.(flusher)
 	s := int64(len(b.buf))
 	var err error
 	bytesRead := int64(0)
@@ -213,7 +213,6 @@ func (b *Buffer) WriteTo(w io.Writer) (int, error) {
 
 	// One of the important property is that when the Buffer is quickly written
 	// to then closed, the remaining data is still sent to all readers.
-	var wgFlushing sync.WaitGroup
 	for atomic.LoadInt32(&b.closed) == 0 || bytesRead != b.bytesWritten {
 		wrote := false
 		for bytesRead < b.bytesWritten && err == nil {
@@ -221,15 +220,6 @@ func (b *Buffer) WriteTo(w io.Writer) (int, error) {
 			end := (b.bytesWritten % s)
 			if end <= off {
 				end = s
-			}
-
-			if f != nil {
-				// Never call .Write() and .Flush() concurrently. Drop the lock, as this
-				// would block the Write() function on reader stuck in Flush(). As long
-				// as there's enough circular buffer left, there's no reason to block.
-				b.readersLock.RUnlock()
-				wgFlushing.Wait()
-				b.readersLock.RLock()
 			}
 
 			var n int
@@ -247,14 +237,6 @@ func (b *Buffer) WriteTo(w io.Writer) (int, error) {
 			// Wake up the writer so that it can rescan b.readerPositions.
 			b.wgReaderWorked.Broadcast()
 
-			if f != nil {
-				wgFlushing.Add(1)
-				go func() {
-					defer wgFlushing.Done()
-					// Flush concurrently to the writer.
-					f.Flush()
-				}()
-			}
 		}
 		if err != nil || atomic.LoadInt32(&b.closed) != 0 {
 			break
@@ -270,7 +252,6 @@ func (b *Buffer) WriteTo(w io.Writer) (int, error) {
 	if err == nil {
 		err = io.EOF
 	}
-	wgFlushing.Wait()
 
 	const maxInt = int64(int(^uint(0) >> 1))
 	read := bytesRead - bytesLost
@@ -281,6 +262,18 @@ func (b *Buffer) WriteTo(w io.Writer) (int, error) {
 	return int(read), err
 }
 
+// AutoFlush converts an io.Writer supporting http.Flusher to call Flush()
+// automatically after each write.
+//
+// The main use case is http connection when piping a circular buffer to it.
+func AutoFlush(w io.Writer) io.Writer {
+	f, _ := w.(flusher)
+	if f == nil {
+		return w
+	}
+	return &autoFlusher{w: w, f: f}
+}
+
 // Internal details.
 
 // flusher is the equivalent of http.Flusher. Importing net/http is quite
@@ -288,4 +281,34 @@ func (b *Buffer) WriteTo(w io.Writer) (int, error) {
 // guaranteed to be stable for Go v1.x.
 type flusher interface {
 	Flush()
+}
+
+type autoFlusher struct {
+	f     flusher
+	w     io.Writer
+	delay time.Time
+	wg    sync.WaitGroup
+}
+
+func (a *autoFlusher) Write(p []byte) (int, error) {
+	// Never call .Write() and .Flush() concurrently.
+	a.wg.Wait()
+	a.wg.Add(1)
+	defer a.wg.Done()
+	n, err := a.w.Write(p)
+	if n != 0 {
+		a.wg.Add(1)
+		go func() {
+			defer a.wg.Done()
+			a.f.Flush()
+		}()
+	}
+	return n, err
+}
+
+func (a *autoFlusher) Flush() {
+	a.wg.Wait()
+	a.wg.Add(1)
+	defer a.wg.Done()
+	a.f.Flush()
 }
