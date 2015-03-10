@@ -37,7 +37,7 @@ func ExampleMakeBuffer_asynchronous() {
 	wg.Add(1)
 	go func() {
 		wg.Done()
-		logBuffer.WriteTo(f)
+		_, _ = logBuffer.WriteTo(f)
 	}()
 	wg.Wait()
 	log.Printf("One more line")
@@ -48,8 +48,8 @@ func ExampleMakeBuffer_asynchronous() {
 	if err != nil {
 		panic(err)
 	}
-	os.Remove("app.log")
-	os.Stdout.Write(out)
+	_ = os.Remove("app.log")
+	_, _ = os.Stdout.Write(out)
 	// Output:
 	// This line is not lost
 	// One more line
@@ -74,8 +74,8 @@ func ExampleMakeBuffer_synchronous() {
 	if err != nil {
 		panic(err)
 	}
-	os.Remove("app.log")
-	os.Stdout.Write(out)
+	_ = os.Remove("app.log")
+	_, _ = os.Stdout.Write(out)
 	// Output:
 	// One more line
 }
@@ -91,7 +91,7 @@ func ExampleMakeBuffer_stdout() {
 	wg.Add(1)
 	go func() {
 		wg.Done()
-		logBuffer.WriteTo(os.Stdout)
+		_, _ = logBuffer.WriteTo(os.Stdout)
 	}()
 	wg.Wait()
 	log.Printf("One more line")
@@ -111,13 +111,13 @@ func ExampleMakeBuffer_web() {
 	http.HandleFunc("/",
 		func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-			logBuffer.WriteTo(w)
+			_, _ = logBuffer.WriteTo(w)
 		})
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		wg.Done()
-		http.ListenAndServe(":6060", nil)
+		_ = http.ListenAndServe(":6060", nil)
 	}()
 	wg.Wait()
 	log.Printf("One more line")
@@ -334,7 +334,7 @@ func TestBufferWriteClosed(t *testing.T) {
 
 	end.Go(func() {
 		s.Step(3)
-		b.WriteTo(h)
+		_, _ = b.WriteTo(h)
 		s.Step(8)
 	})
 
@@ -380,7 +380,7 @@ func TestBufferFlushBlocking(t *testing.T) {
 			},
 		}
 		s.Step(0)
-		b.WriteTo(h)
+		_, _ = b.WriteTo(h)
 		s.Step(4)
 	})
 	s.Step(1)
