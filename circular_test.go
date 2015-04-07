@@ -21,6 +21,10 @@ import (
 	"github.com/maruel/ut"
 )
 
+func init() {
+	//log.SetOutput(ioutil.Discard)
+}
+
 func ExampleMakeBuffer_asynchronous() {
 	// Saves the log to disk asynchrously. The main drawback, which is
 	// significant with this use-case, is that logs will be partially lost on
@@ -94,7 +98,30 @@ func ExampleMakeBuffer_stdout() {
 		_, _ = logBuffer.WriteTo(os.Stdout)
 	}()
 	wg.Wait()
+	// This one is lost, because there's no flush.
 	log.Printf("One more line")
+	logBuffer.Close()
+	// Output:
+	// This line is not lost
+}
+
+func ExampleMakeBuffer_stdout_flush() {
+	// Prints the content asynchronously to stdout or stderr in addition to
+	// keeping the log in memory.
+	logBuffer := MakeBuffer(10 * 1024 * 1024)
+	log.SetFlags(0)
+	log.SetOutput(logBuffer)
+	log.Printf("This line is not lost")
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		wg.Done()
+		_, _ = logBuffer.WriteTo(os.Stdout)
+	}()
+	wg.Wait()
+	// This one is lost, because there's no flush.
+	log.Printf("One more line")
+	logBuffer.Flush()
 	logBuffer.Close()
 	// Output:
 	// This line is not lost
@@ -141,12 +168,12 @@ func TestBufferInternalState(t *testing.T) {
 		{"Overly long string", "g stringon"},
 	}
 	bytesWritten := 0
-	b := MakeBuffer(10)
+	b := makeBuffer(10)
 	for i, item := range data {
 		writeOk(t, b, item.written)
 		bytesWritten += len(item.written)
 		ut.AssertEqualIndex(t, i, item.buf, string(b.buf))
-		ut.AssertEqualIndex(t, i, int64(bytesWritten), b.bytesWritten)
+		ut.AssertEqualIndex(t, i, int64(bytesWritten), b.writer.get())
 	}
 }
 
@@ -156,25 +183,12 @@ func TestBufferNoHangOnFail(t *testing.T) {
 	actualErr := errors.New("Failed")
 	// Returns immediately.
 	n, err := b.WriteTo(&failWriter{actualErr})
-	ut.AssertEqual(t, 0, n)
+	ut.AssertEqual(t, int64(0), n)
 	ut.AssertEqual(t, actualErr, err)
 }
 
 func TestBufferZero(t *testing.T) {
-	ut.AssertEqual(t, (*Buffer)(nil), MakeBuffer(0))
-}
-
-func TestBufferDidntUseMakeBuffer(t *testing.T) {
-	// Incorrect.
-	b := &Buffer{}
-	n, err := b.Write([]byte("foo"))
-	ut.AssertEqual(t, 0, n)
-	ut.AssertEqual(t, io.ErrClosedPipe, err)
-	n, err = b.WriteTo(&bytes.Buffer{})
-	ut.AssertEqual(t, 0, n)
-	ut.AssertEqual(t, io.ErrClosedPipe, err)
-	ut.AssertEqual(t, io.ErrClosedPipe, b.Close())
-	b.Flush()
+	ut.AssertEqual(t, (*buffer)(nil), MakeBuffer(0))
 }
 
 func TestBufferEOF(t *testing.T) {
@@ -182,21 +196,34 @@ func TestBufferEOF(t *testing.T) {
 	writeOk(t, b, "Hello")
 	actualErr := errors.New("Failed")
 	n, err := b.WriteTo(&failWriter{actualErr})
-	ut.AssertEqual(t, 0, n)
+	ut.AssertEqual(t, int64(0), n)
 	ut.AssertEqual(t, actualErr, err)
 }
 
-func TestBufferClosed(t *testing.T) {
+func TestBufferClosedTwice(t *testing.T) {
+	b := MakeBuffer(10)
+	ut.AssertEqual(t, nil, b.Close())
+	ut.AssertEqual(t, io.ErrClosedPipe, b.Close())
+}
+
+func TestBufferClosedWrite(t *testing.T) {
 	b := MakeBuffer(10)
 	ut.AssertEqual(t, nil, b.Close())
 	n, err := b.Write([]byte("foo"))
 	ut.AssertEqual(t, 0, n)
 	ut.AssertEqual(t, io.ErrClosedPipe, err)
-	ut.AssertEqual(t, io.ErrClosedPipe, b.Close())
+}
+
+func TestBufferClosedWriteTo(t *testing.T) {
+	b := MakeBuffer(10)
+	ut.AssertEqual(t, nil, b.Close())
+	n, err := b.WriteTo(&bytes.Buffer{})
+	ut.AssertEqual(t, int64(0), n)
+	ut.AssertEqual(t, io.ErrClosedPipe, err)
 }
 
 func TestBufferWriteLock(t *testing.T) {
-	b := MakeBuffer(10)
+	b := makeBuffer(10)
 	var end End
 	var ready sync.WaitGroup
 	b.writerLock.Lock()
@@ -215,25 +242,24 @@ func TestBufferWriteLock(t *testing.T) {
 
 func TestBufferRolledOver(t *testing.T) {
 	var end End
-	b := MakeBuffer(10)
+	b := makeBuffer(10)
 	buffer := &bytes.Buffer{}
-	writeOk(t, b, "Overflowed totally")
-	ut.AssertEqual(t, " totallyed", string(b.buf))
+	writeOk(t, b, "abcdefghijklmnopqr")
+	ut.AssertEqual(t, "klmnopqrij", string(b.buf))
 	var wg sync.WaitGroup
 
 	wg.Add(1)
 	end.Go(func() {
 		wg.Done()
 		n, err := b.WriteTo(buffer)
-		ut.AssertEqual(t, 13, n)
+		ut.AssertEqual(t, int64(10), n)
 		ut.AssertEqual(t, io.EOF, err)
 	})
 	wg.Wait()
-	// Technically, we want to wait for b.WriteTo() to get the lock. Argh.
-	writeOk(t, b, "hey")
+	writeOk(t, b, "stu")
 	ut.AssertEqual(t, nil, b.Close())
 	end.Wait()
-	ut.AssertEqual(t, "ed totallyhey", buffer.String())
+	ut.AssertEqual(t, "ijklmnopqr", buffer.String())
 }
 
 func TestBufferReaders(t *testing.T) {
@@ -251,21 +277,21 @@ func TestBufferReaders(t *testing.T) {
 			defer wgEnd.Done()
 			wgReady.Done()
 			n, err := b.WriteTo(&buffers[j])
-			ut.AssertEqual(t, 28, n)
+			ut.AssertEqual(t, int64(20), n)
 			ut.AssertEqual(t, io.EOF, err)
 		}(i)
 	}
 
 	wgReady.Wait()
-	writeOk(t, b, "Hello")
-	writeOk(t, b, "Hallo")
-	writeOk(t, b, "Overflowed totally")
+	writeOk(t, b, "abcde")
+	writeOk(t, b, "fghij")
+	writeOk(t, b, "klmnopqrstuvwxyzAB")
 
 	ut.AssertEqual(t, nil, b.Close())
 	wgEnd.Wait()
 
 	for i := 0; i < len(buffers); i++ {
-		ut.AssertEqual(t, "HelloHalloOverflowed totally", buffers[i].String())
+		ut.AssertEqual(t, "abcdefghijklmnopqrst", buffers[i].String())
 	}
 }
 
@@ -280,14 +306,14 @@ func TestBufferFlusher(t *testing.T) {
 	end.Go(func() {
 		wgReady.Done()
 		n, err := b.WriteTo(AutoFlushInstant(w))
-		ut.AssertEqual(t, 7, n)
+		ut.AssertEqual(t, int64(7), n)
 		ut.AssertEqual(t, io.EOF, err)
-		ut.AssertEqual(t, "HelloHi", w.buf.String())
+		ut.AssertEqual(t, "abcdefg", w.buf.String())
 	})
 
+	writeOk(t, b, "abcde")
+	writeOk(t, b, "fg")
 	wgReady.Wait()
-	writeOk(t, b, "Hello")
-	writeOk(t, b, "Hi")
 	ut.AssertEqual(t, nil, b.Close())
 	end.Wait()
 	ut.AssertEqual(t, true, w.flushed)
@@ -296,8 +322,8 @@ func TestBufferFlusher(t *testing.T) {
 func TestBufferFlusherRolledOver(t *testing.T) {
 	var end End
 	b := MakeBuffer(10)
-	writeOk(t, b, "hello")
-	writeOk(t, b, "HELLO")
+	writeOk(t, b, "abcde")
+	writeOk(t, b, "fghij")
 	w := &flusherWriter{}
 	var wgEnd sync.WaitGroup
 	wgEnd.Add(1)
@@ -307,13 +333,14 @@ func TestBufferFlusherRolledOver(t *testing.T) {
 	end.Go(func() {
 		wgReady.Done()
 		n, err := b.WriteTo(AutoFlushInstant(w))
-		ut.AssertEqual(t, 25, n)
+		ut.AssertEqual(t, int64(25), n)
 		ut.AssertEqual(t, io.EOF, err)
-		ut.AssertEqual(t, "helloHELLOHave a nice day", w.buf.String())
+		ut.AssertEqual(t, "abcdefghijklmnopqrstuvwxy", w.buf.String())
 	})
 
 	wgReady.Wait()
-	writeOk(t, b, "Have a nice day")
+	writeOk(t, b, "klmnopqrstuvwxy")
+	b.Flush()
 	ut.AssertEqual(t, nil, b.Close())
 	end.Wait()
 }
@@ -340,9 +367,9 @@ func TestBufferWriteClosed(t *testing.T) {
 
 	end.Go(func() {
 		s.Step(1)
-		writeOk(t, b, "Hi")
+		writeOk(t, b, "ab")
 		s.Step(2)
-		writeOk(t, b, "Ho")
+		writeOk(t, b, "cd")
 		s.Step(6)
 	})
 
@@ -355,7 +382,7 @@ func TestBufferWriteClosed(t *testing.T) {
 	s.Step(0)
 	s.Step(9)
 	end.Wait()
-	ut.AssertEqual(t, "HiHo", h.buf.String())
+	ut.AssertEqual(t, "abcd", h.buf.String())
 	ut.AssertEqual(t, 0, len(h.f))
 }
 
@@ -370,7 +397,7 @@ func TestBufferFlushBlocking(t *testing.T) {
 	var end End
 	s := makeSequence(6)
 	b := MakeBuffer(10)
-	writeOk(t, b, "hello")
+	writeOk(t, b, "abcde")
 	end.Go(func() {
 		h := &hookWriter{
 			f: []func(){
@@ -424,7 +451,7 @@ func stressTest(t *testing.T, s string, maker func() io.ReadWriter) {
 			defer endReaders.Done()
 			wgReady.Done()
 			n, err := b.WriteTo(AutoFlush(readers[j], 1*time.Millisecond))
-			ut.AssertEqual(t, len(s)*len(readers), n)
+			ut.AssertEqual(t, int64(len(s)*len(readers)), n)
 			ut.AssertEqual(t, io.EOF, err)
 		}(i)
 
@@ -439,6 +466,7 @@ func stressTest(t *testing.T, s string, maker func() io.ReadWriter) {
 	// Fire all writers at once.
 	wgStart.Done()
 	endWriters.Wait()
+	b.Flush()
 	ut.AssertEqual(t, nil, b.Close())
 	endReaders.Wait()
 	expected := strings.Repeat(s, len(readers))
@@ -449,8 +477,90 @@ func stressTest(t *testing.T, s string, maker func() io.ReadWriter) {
 	}
 }
 
+func TestBufferWriteClosedPipe(t *testing.T) {
+	// Close while Write() is stuck due to an hung Flush().
+	var end End
+	s := makeSequence(3)
+	b := MakeBuffer(10)
+	w := &flusherWriterHang{}
+	// Misallign the buffer in the middle.
+	writeOk(t, b, "abcde")
+	w.hang.Add(1)
+	end.Go(func() {
+		s.Step(0)
+		n, err := b.WriteTo(AutoFlushInstant(w))
+		// Never gets to write anything due to hang.
+		ut.AssertEqual(t, int64(5), n)
+		ut.AssertEqual(t, io.EOF, err)
+	})
+	end.Go(func() {
+		s.Step(1)
+		// 12 is larger than the size of the buffer.
+		n, err := b.Write([]byte("fghijklmnopq"))
+		// 2 bytes are lost.
+		ut.AssertEqual(t, 10, n)
+		ut.AssertEqual(t, io.ErrClosedPipe, err)
+	})
+	s.Step(2)
+	w.hang.Done()
+	ut.AssertEqual(t, nil, b.Close())
+	end.Wait()
+}
+
+func TestBufferReaderLaggard(t *testing.T) {
+	// Synthetically makes a reader a laggard, close while still writing.
+	var end End
+	s := makeSequence(6)
+	b := makeBuffer(10)
+	w := [2]flusherWriterHang{}
+	writeOk(t, b, "abcdefghijk")
+	w[0].hang.Add(1)
+	end.Go(func() {
+		// This one hangs.
+		s.Step(0)
+		n, err := b.WriteTo(AutoFlushInstant(&w[0]))
+		ut.AssertEqual(t, "bcdefghijklmnopqrst", w[0].buf.String())
+		ut.AssertEqual(t, int64(19), n)
+		ut.AssertEqual(t, io.EOF, err)
+	})
+	end.Go(func() {
+		s.Step(1)
+		n, err := b.WriteTo(AutoFlushInstant(&w[1]))
+		ut.AssertEqual(t, "bcdefghijklmnopqrstu", w[1].buf.String())
+		ut.AssertEqual(t, int64(20), n)
+		ut.AssertEqual(t, io.EOF, err)
+	})
+	end.Go(func() {
+		s.Step(2)
+		n, err := b.Write([]byte("lmnopqrstuvwxyzABC"))
+		ut.AssertEqual(t, 10, n)
+		ut.AssertEqual(t, io.ErrClosedPipe, err)
+	})
+	s.Step(3)
+	// Spuriously wake up the Writer. This is to exercise the loop in Write()
+	// that iterates over b.positions and finds a laggard.
+	b.readers.broadcast()
+	end.Go(func() {
+		s.Step(4)
+		ut.AssertEqual(t, nil, b.Close())
+	})
+	end.Go(func() {
+		s.Step(5)
+		w[0].hang.Done()
+	})
+	end.Wait()
+}
+
 // Utilities.
 
+// writeOk writes and ensures write succeeded.
+func writeOk(t *testing.T, w io.Writer, s string) {
+	n, err := w.Write([]byte(s))
+	ut.AssertEqual(t, len(s), n)
+	ut.AssertEqual(t, nil, err)
+}
+
+// failWriter fails all writes.
 type failWriter struct {
 	err error
 }
@@ -459,12 +569,7 @@ func (f *failWriter) Write(p []byte) (int, error) {
 	return 0, f.err
 }
 
-func writeOk(t *testing.T, w io.Writer, s string) {
-	n, err := w.Write([]byte(s))
-	ut.AssertEqual(t, len(s), n)
-	ut.AssertEqual(t, nil, err)
-}
-
+// flusherWriter implements http.Flusher.
 type flusherWriter struct {
 	buf     bytes.Buffer
 	flushed bool
@@ -478,11 +583,11 @@ func (f *flusherWriter) Write(p []byte) (int, error) {
 	return f.buf.Write(p)
 }
 
-// Flush implements http.Flusher.
 func (f *flusherWriter) Flush() {
 	f.flushed = true
 }
 
+// flusherWriterHang implements http.Flusher but hangs in addition.
 type flusherWriterHang struct {
 	flusherWriter
 	hang sync.WaitGroup
@@ -493,6 +598,8 @@ func (f *flusherWriterHang) Flush() {
 	f.flusherWriter.Flush()
 }
 
+// flusherWriterDelay implements http.Flusher but induces a goroutine
+// scheduling event in addition.
 type flusherWriterDelay struct {
 	flusherWriter
 }
@@ -503,6 +610,7 @@ func (f *flusherWriterDelay) Flush() {
 	f.flusherWriter.Flush()
 }
 
+// hookWriter pops a function from the hook slice at each write.
 type hookWriter struct {
 	buf bytes.Buffer
 	f   []func()
@@ -514,6 +622,7 @@ func (h *hookWriter) Write(p []byte) (int, error) {
 	return h.buf.Write(p)
 }
 
+// sequence is used to enforce deterministic behavior like a state machine.
 type sequence struct {
 	wg []sync.WaitGroup
 }

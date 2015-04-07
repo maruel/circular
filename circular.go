@@ -3,323 +3,321 @@
 // that can be found in the LICENSE file.
 
 // Package circular implements an efficient thread-safe circular byte buffer to
-// keep in-memory logs. It implements both io.Writer and io.WriterTo.
-//
-// It carries a minimal set of dependencies.
+// keep in-memory logs.
 package circular
 
 import (
 	"io"
+	"math"
 	"sync"
 	"sync/atomic"
-	"time"
 )
 
-// Buffer is designed to keep recent logs in-memory efficiently and in a
-// thread-safe manner. It implements both io.Writer and io.WriterTo. It must be
-// instantiated with MakeBuffer().
-//
-// No heap allocation is done within Buffer.Write(). Independent readers each
-// have their read position and are synchronized with the writer to not have
-// any data loss.
-type Buffer struct {
-	closed              int32          // Set to 1 by Close() via atomic.
-	wgActiveReaders     sync.WaitGroup // Number of readers active.
-	wgReaderWorked      sync.Cond      // Number of readers waiting for new data.
-	readerPositionsLock sync.Mutex     // Protects the next 2 variables.
-	readerPositions     map[int]int64  // Position of each readers. Can only be changed with readersLock.RLock() held. It's to ensure the writer doesn't not overwrite bytes.
-	nextReaderID        int            // Next id for the next reader, b.WriteTo().
-	writerLock          sync.Mutex     // Only one writer can write chunks at once.
-	readersLock         sync.RWMutex   // Lock controls the following members.
-	newData             sync.Cond      // Used to unblock readers all at once.
-	buf                 []byte         // The data itself.
-	bytesWritten        int64          // Total bytes written. It's controlled by readersLock.Lock(). b.bytesWritten % len(b.buf) represents the write offset. This value monotonically increases.
+// CircularBuffer is the interface to a circular buffer. It can be written to
+// and read from.
+type CircularBuffer interface {
+	// Close() aborts all WriteTo() streamers synchronously and blocks until they
+	// all quit. It also aborts in-progress Write() calls. Close() can safely be
+	// called in a reentrant context, as it doesn't use any lock.
+	//
+	// If the caller wants the data to be flushed to all readers, Flush() must be
+	// called first.
+	io.Closer
+
+	// Write(p) writes the data to the circular buffer and wakes up any WriteTo()
+	// reader. If p is longer or equal to the internal buffer, this call will
+	// block until all readers have kept up with the data. To not get into this
+	// condition and keep Write() performant, ensure the internal buffer is
+	// significantly larger than the largest writes.
+	io.Writer
+
+	// WriteTo() streams a buffer to a io.Writer until the buffer is closed or a
+	// write error occurs. It forcibly flushes the output if w supports
+	// http.Flusher so it is sent to the underlying TCP connection as data is
+	// appended.
+	io.WriterTo
+
+	// Flush implements http.Flusher. It forcibly blocks until all readers are up
+	// to date.
+	Flush()
 }
 
-// MakeBuffer returns an initialized Buffer.
-func MakeBuffer(size int) *Buffer {
+type buffer struct {
+	closed     bit           // Set by Close().
+	readers    positions     // Each reader position.
+	writer     writePosition // Writer position.
+	writerLock sync.Mutex    // Only one writer can write chunks at once.
+	buf        []byte        // The data itself.
+}
+
+// MakeBuffer returns an initialized CircularBuffer.
+//
+// It is designed to keep recent logs in-memory efficiently and in a
+// thread-safe manner. No heap allocation is done within
+// CircularBuffer.Write(). Independent readers each have their read position
+// and are synchronized with the writer to not have any data loss.
+func MakeBuffer(size int) CircularBuffer {
+	return makeBuffer(size)
+}
+
+func makeBuffer(size int) *buffer {
 	if size <= 0 {
 		return nil
 	}
-	b := &Buffer{
-		buf:             make([]byte, size),
-		readerPositions: map[int]int64{},
+	b := &buffer{
+		buf: make([]byte, size),
+		readers: positions{
+			cond: *sync.NewCond(&sync.Mutex{}),
+			pos:  make(map[posID]int64),
+		},
+		writer: writePosition{
+			cond: *sync.NewCond(&sync.Mutex{}),
+		},
 	}
-	b.wgReaderWorked = *sync.NewCond(&sync.Mutex{})
-	b.newData = *sync.NewCond(b.readersLock.RLocker())
 	return b
 }
 
-// Write implements io.Writer. It appends data to the buffer.
-//
-// If p is longer or equal to the internal buffer, this call will block until
-// all readers have kept up with the data. To not get into this condition and
-// keep Write() performant, ensure the internal buffer is significantly larger
-// than the largest writes.
-func (b *Buffer) Write(p []byte) (int, error) {
-	s := int64(len(b.buf))
-	if s == 0 || atomic.LoadInt32(&b.closed) != 0 {
-		return 0, io.ErrClosedPipe
+func (b *buffer) Close() error {
+	if !b.closed.set() {
+		return io.ErrClosedPipe
 	}
+	b.readers.broadcast()
+	b.writer.broadcast()
+	// Waits for all the readers (active WriteTo() calls) to terminate.
+	for b.readers.wait(math.MaxInt64-1) != math.MaxInt64 {
+	}
+	return nil
+}
+
+func (b *buffer) Write(p []byte) (int, error) {
+	s := len(b.buf)
+	s64 := int64(s)
 
 	// Only one writer can write multiple chunks at once. This fixes the issue
 	// where multiple concurrent writers would have their chunk interleaved.
 	b.writerLock.Lock()
 	defer b.writerLock.Unlock()
 
-	if atomic.LoadInt32(&b.closed) != 0 {
-		return 0, io.ErrClosedPipe
-	}
-
-	// Takes the RWLock writer lock. At that point, it's safe to write data.
-	b.readersLock.Lock()
-	defer b.readersLock.Unlock()
-
-	originalbytesWritten := b.bytesWritten
-	for len(p) > 0 && atomic.LoadInt32(&b.closed) == 0 {
-		writeOffset := b.bytesWritten % s
-		chunkSize := int64(len(p))
-		if chunkSize > s-writeOffset {
-			chunkSize = s - writeOffset
+	originalbytesWritten := b.writer.get()
+	for len(p) > 0 && !b.closed.isSet() {
+		// write offset within the buffer.
+		bytesWrittenWrapped := int(b.writer.get() % s64)
+		chunkSize := len(p)
+		if chunkSize > s-bytesWrittenWrapped {
+			// wrapping around.
+			chunkSize = s - bytesWrittenWrapped
 		}
-		skip := false
-		if b.bytesWritten >= s {
-			bytesToBeOverwritten := b.bytesWritten + chunkSize - s
-			b.readerPositionsLock.Lock()
-			// Look for a laggard. In that case, sleep until it catches up.
-			for _, readerPosition := range b.readerPositions {
-				if readerPosition < bytesToBeOverwritten {
-					// Damn, we have to sleep again.
-					skip = true
-					break
+		// Look for a laggard. In that case, sleep until it catches up.
+		//
+		// Case #1:              01234567890123456789
+		//  b.buf:               |--------|         10
+		//  b.bytesWritten:      |---------------|  16
+		//  bytesWrittenWrapped:       |             6
+		//  laggardReader:       |------------|     13
+		//  laggardWrapped:         |                3
+		//  writeable section:   |-|   |--|         (0-2) & (6-9)
+		//  danger zone:            |-|             (3-5)
+		//
+		// Case #2:              0123456789012345678901
+		//  b.buf:               |--------|              10
+		//  b.bytesWritten:      |--------------------|  21
+		//  bytesWrittenWrapped:  |                       1
+		//  laggardReader:       |-------------|         14
+		//  laggardWrapped:          |                    3
+		//  writeable section:    |-|                    (1-3)
+		//  danger zone:         |   |----|              (0-0) & (4-9)
+		laggardReader := b.readers.minPos()
+		if laggardReader != math.MaxInt64 {
+			if laggardReader <= b.writer.get()-s64 {
+				// More than or equal a buffer size in difference.
+				b.readers.wait(laggardReader)
+				continue
+			}
+
+			laggardWrapped := int(laggardReader % s64)
+			if laggardWrapped > bytesWrittenWrapped {
+				delta := laggardWrapped - bytesWrittenWrapped
+				if chunkSize > delta {
+					chunkSize = delta
 				}
 			}
-			b.readerPositionsLock.Unlock()
 		}
-
-		if !skip {
-			copy(b.buf[writeOffset:], p)
-			// Use atomic function for concurrency with Flush(). In practice
-			// b.readerPositionsLock could as well be used. It's not a big deal
-			// either way.
-			atomic.StoreInt64(&b.bytesWritten, b.bytesWritten+chunkSize)
-			p = p[chunkSize:]
-		}
-
-		// Only do the lock/unlock dance if there's actually at least one reader.
-		if len(b.readerPositions) != 0 {
-			// Readers are now fired.
-			b.readersLock.Unlock()
-			b.newData.Broadcast()
-			// Wait for at least one reader to work first.
-			b.wgReaderWorked.L.Lock()
-			b.wgReaderWorked.Wait()
-			b.wgReaderWorked.L.Unlock()
-			// Ensure no other reader get in the way.
-			b.readersLock.Lock()
-		}
+		copy(b.buf[bytesWrittenWrapped:], p[:chunkSize])
+		b.writer.add(chunkSize)
+		p = p[chunkSize:]
 	}
-	diff := int(b.bytesWritten - originalbytesWritten)
-	if atomic.LoadInt32(&b.closed) != 0 {
+	diff := int(b.writer.get() - originalbytesWritten)
+	if b.closed.isSet() {
 		return diff, io.ErrClosedPipe
 	}
 	return diff, nil
 }
 
-// Close implements io.Closer. It closes all WriteTo() streamers synchronously
-// and blocks until they all quit.
-//
-// Close can safely be called in a reentrant context, as it doesn't use any
-// lock.
-func (b *Buffer) Close() error {
-	if len(b.buf) == 0 || !atomic.CompareAndSwapInt32(&b.closed, 0, 1) {
-		return io.ErrClosedPipe
-	}
-	b.newData.Broadcast()
-	// Waits for all the readers (active WriteTo() calls) to terminate. This can
-	// be problematic when a reader is hung in a Flush() call.
-	b.wgActiveReaders.Wait()
-	return nil
-}
+func (b *buffer) Flush() {
+	b.writerLock.Lock()
+	defer b.writerLock.Unlock()
 
-// Flush implements http.Flusher. It forcibly blocks until all readers are up
-// to date.
-func (b *Buffer) Flush() {
-	if len(b.buf) == 0 {
-		return
-	}
-	for {
-		if atomic.LoadInt32(&b.closed) != 0 {
-			return
-		}
-
-		b.readerPositionsLock.Lock()
-		if len(b.readerPositions) == 0 {
-			return
-		}
-		bytesWritten := atomic.LoadInt64(&b.bytesWritten)
-		laggard := false
-		for _, readerPosition := range b.readerPositions {
-			if readerPosition < bytesWritten {
-				laggard = true
-				break
-			}
-		}
-		b.readerPositionsLock.Unlock()
-		if !laggard || atomic.LoadInt32(&b.closed) != 0 {
-			return
-		}
-
-		// There's a laggard, wait for an update.
-		b.wgReaderWorked.L.Lock()
-		b.wgReaderWorked.Wait()
-		b.wgReaderWorked.L.Unlock()
+	laggardReader := b.readers.minPos()
+	for !b.closed.isSet() && laggardReader != b.writer.get() && laggardReader != math.MaxInt64 {
+		laggardReader = b.readers.wait(laggardReader)
 	}
 }
 
-// WriteTo implements io.WriterTo. It streams a Buffer to a io.Writer until
-// the Buffer is closed or a write error occurs.
-//
-// It forcibly flushes the output if w supports http.Flusher so it is sent to
-// the underlying TCP connection as data is appended.
-//
-// This function can easily overflow on 32 bits platforms. In that case, return
-// the largest valid integer.
-func (b *Buffer) WriteTo(w io.Writer) (int, error) {
-	if len(b.buf) == 0 || atomic.LoadInt32(&b.closed) != 0 {
+func (b *buffer) WriteTo(w io.Writer) (int64, error) {
+	if b.closed.isSet() {
 		return 0, io.ErrClosedPipe
 	}
 
-	b.wgActiveReaders.Add(1)
-	defer b.wgActiveReaders.Done()
-
-	s := int64(len(b.buf))
-	var err error
-	bytesRead := int64(0)
-	bytesLost := int64(0)
-
-	b.readersLock.RLock()
-
 	// Calculate the number of buffer cycles that were lost.
-	if b.bytesWritten > s {
-		bytesLost = b.bytesWritten - s
-		bytesRead = bytesLost
+	s := int64(len(b.buf))
+	readOffset := int64(0)
+	bytesLost := int64(0)
+	bytesWritten := b.writer.get()
+	if bytesWritten > s {
+		bytesLost = bytesWritten - s
+		readOffset = bytesLost
 	}
-	b.readerPositionsLock.Lock()
-	id := b.nextReaderID
-	b.nextReaderID++
-	b.readerPositions[id] = bytesLost
-	b.readerPositionsLock.Unlock()
 
-	// One of the important property is that when the Buffer is quickly written
-	// to then closed, the remaining data is still sent to all readers.
-	for atomic.LoadInt32(&b.closed) == 0 || bytesRead != b.bytesWritten {
-		wrote := false
-		for bytesRead < b.bytesWritten && err == nil {
-			off := bytesRead % s
-			end := (b.bytesWritten % s)
-			if end <= off {
-				end = s
-			}
+	id := b.readers.register(bytesLost)
+	defer b.readers.unregister(id)
 
-			var n int
-			n, err = w.Write(b.buf[off:end])
-			bytesRead += int64(n)
-			b.readerPositionsLock.Lock()
-			b.readerPositions[id] = bytesRead
-			b.readerPositionsLock.Unlock()
-			wrote = n != 0
-			if n == 0 {
+	var err error
+	for err == nil {
+		for err == nil {
+			if b.closed.isSet() {
+				err = io.EOF
 				break
 			}
+			bytesWritten = b.writer.get()
+			if readOffset == bytesWritten {
+				break
+			}
+			readOffsetWrapped := readOffset % s
+			end := bytesWritten % s
+			if end <= readOffsetWrapped {
+				end = s
+			}
+			var n int
+			n, err = w.Write(b.buf[readOffsetWrapped:end])
+			readOffset = b.readers.add(id, n)
 		}
-		if wrote {
-			// Wake up the writer so that it can rescan b.readerPositions.
-			b.wgReaderWorked.Broadcast()
-
-		}
-		if err != nil || atomic.LoadInt32(&b.closed) != 0 {
+		if err != nil {
 			break
 		}
-
-		// Enter sleep mode, releasing the lock.
-		b.newData.Wait()
+		// Enter sleep mode.
+		b.writer.wait(bytesWritten)
 	}
-	b.readerPositionsLock.Lock()
-	delete(b.readerPositions, id)
-	b.readerPositionsLock.Unlock()
-	b.readersLock.RUnlock()
-	if err == nil {
-		err = io.EOF
-	}
-
-	const maxInt = int64(int(^uint(0) >> 1))
-	read := bytesRead - bytesLost
-	if read > maxInt {
-		// This line is hard to cover.
-		read = maxInt
-	}
-	return int(read), err
-}
-
-// AutoFlush converts an io.Writer supporting http.Flusher to call Flush()
-// automatically after each write after a small delay.
-//
-// The main use case is http connection when piping a circular buffer to it.
-func AutoFlush(w io.Writer, delay time.Duration) io.Writer {
-	f, _ := w.(flusher)
-	if f == nil {
-		return w
-	}
-	return &autoFlusher{w: w, f: f, delay: delay}
-}
-
-func AutoFlushInstant(w io.Writer) io.Writer {
-	return AutoFlush(w, time.Duration(0))
+	return readOffset - bytesLost, err
 }
 
 // Internal details.
 
-// flusher is the equivalent of http.Flusher. Importing net/http is quite
-// heavy. It's not worth importing it just for this interface which is
-// guaranteed to be stable for Go v1.x.
-type flusher interface {
-	Flush()
+type posID int
+
+// positions wraps the position updates.
+type positions struct {
+	cond   sync.Cond
+	pos    map[posID]int64
+	nextID posID
 }
 
-type autoFlusher struct {
-	f            flusher
-	w            io.Writer
-	delay        time.Duration
-	lock         sync.Mutex
-	flushPending bool
+func (p *positions) minPos() int64 {
+	p.cond.L.Lock()
+	defer p.cond.L.Unlock()
+	return p.minPosImpl()
 }
 
-func (a *autoFlusher) Write(p []byte) (int, error) {
-	// Never call .Write() and .Flush() concurrently.
-	a.lock.Lock()
-	n, err := a.w.Write(p)
-	defer a.lock.Unlock()
-	if n != 0 && !a.flushPending {
-		a.flushPending = true
-		go func() {
-			if a.delay != 0 {
-				<-time.After(a.delay)
-			}
-			a.lock.Lock()
-			if a.flushPending {
-				a.f.Flush()
-				a.flushPending = false
-			}
-			a.lock.Unlock()
-		}()
+// minPosImpl returns the minimum position value or math.MaxInt64. Lock must be
+// held.
+func (p *positions) minPosImpl() int64 {
+	min := int64(math.MaxInt64)
+	for _, v := range p.pos {
+		if v < min {
+			min = v
+		}
 	}
-	return n, err
+	return min
 }
 
-func (a *autoFlusher) Flush() {
-	a.lock.Lock()
-	defer a.lock.Unlock()
-	a.flushPending = false
-	a.f.Flush()
+// wait waits until all positions are past prev. Returns math.MaxInt64 if there
+// is no reader.
+func (p *positions) wait(prev int64) int64 {
+	p.cond.L.Lock()
+	defer p.cond.L.Unlock()
+	for {
+		min := p.minPosImpl()
+		if min > prev {
+			return min
+		}
+		p.cond.Wait()
+	}
+}
+
+func (p *positions) add(id posID, chunkSize int) int64 {
+	p.cond.L.Lock()
+	defer p.cond.L.Unlock()
+	p.pos[id] += int64(chunkSize)
+	p.broadcast()
+	return p.pos[id]
+}
+
+func (p *positions) broadcast() {
+	p.cond.Broadcast()
+}
+
+func (p *positions) register(initial int64) posID {
+	p.cond.L.Lock()
+	defer p.cond.L.Unlock()
+	cur := p.nextID
+	p.pos[cur] = initial
+	p.nextID++
+	return cur
+}
+
+func (p *positions) unregister(id posID) {
+	p.cond.L.Lock()
+	defer p.cond.L.Unlock()
+	delete(p.pos, id)
+	p.broadcast()
+}
+
+// writePosition handles the writer position.
+type writePosition struct {
+	bytesWritten int64     // Total bytes written. It's controlled by readersLock.Lock(). b.bytesWritten % len(b.buf) represents the write offset. This value monotonically increases.
+	cond         sync.Cond // Used to unblock readers all at once.
+}
+
+func (w *writePosition) add(chunkSize int) {
+	_ = atomic.AddInt64(&w.bytesWritten, int64(chunkSize))
+	w.broadcast()
+}
+
+func (w *writePosition) broadcast() {
+	w.cond.Broadcast()
+}
+
+func (w *writePosition) get() int64 {
+	return atomic.LoadInt64(&w.bytesWritten)
+}
+
+func (w *writePosition) wait(bytesWritten int64) {
+	w.cond.L.Lock()
+	if bytesWritten == w.get() {
+		w.cond.Wait()
+	}
+	w.cond.L.Unlock()
+}
+
+// bit is a non-resetable thread-safe bit.
+type bit struct {
+	bit int32
+}
+
+func (b *bit) isSet() bool {
+	return atomic.LoadInt32(&b.bit) != 0
+}
+
+// set returns true if the bit was set.
+func (b *bit) set() bool {
+	return atomic.CompareAndSwapInt32(&b.bit, 0, 1)
 }

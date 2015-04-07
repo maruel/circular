@@ -21,9 +21,6 @@ Features
 Examples
 --------
 
-It is recommended to use multiple techniques simultaneously. For example, using
-synchronous write to file coupled with web server.
-
 
 Web
 ===
@@ -85,8 +82,8 @@ Asynchronous
         logBuffer.WriteTo(f)
     }()
     wg.Wait()
+    // Will not be written.
     log.Printf("One more line")
-    logBuffer.Flush()
     logBuffer.Close()
     f.Close()
 
@@ -139,5 +136,6 @@ Synchronous
     }
     log.SetOutput(io.MultiWriter(logBuffer, f))
     log.Printf("One more line")
+    logBuffer.Flush()
     logBuffer.Close()
     f.Close()
