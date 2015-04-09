@@ -63,7 +63,8 @@ panic() output itself is only written to stderr since it uses print() builtin.
           func(w http.ResponseWriter, r *http.Request) {
               w.Header().Set("Content-Type", "text/plain; charset=utf-8")
               // Streams the log buffer over HTTP until Close() is called.
-              logBuffer.WriteTo(w)
+              // AutoFlush ensures the log is not buffered locally indefinitely.
+              logBuffer.WriteTo(circular.AutoFlush(w, time.Second))
           })
       http.ListenAndServe(":6060", nil)
     }
