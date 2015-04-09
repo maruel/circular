@@ -18,12 +18,16 @@ Features
   - Full test coverage.
 
 
-Examples
---------
+Example
+-------
 
+  - Safely writes log to disk synchronously in addition to keeping a circular
+    buffer.
+  - Serves the circular log buffer over HTTP asychronously.
+  - Writes log to stderr asynchronously.
 
-Web
-===
+This permits keeping all the output in case of a panic() on disk. Note that
+panic() output itself is only written to stderr since it uses print() builtin.
 
     import (
       "log"
@@ -33,109 +37,33 @@ Web
       "github.com/maruel/circular"
     )
 
-    // Serves the circular log buffer over HTTP. This can be coupled with the
-    // other techniques.
-    logBuffer := circular.MakeBuffer(10 * 1024 * 1024)
-    log.SetOutput(logBuffer)
-    log.Printf("This line is not lost")
-    http.HandleFunc("/",
-        func(w http.ResponseWriter, r *http.Request) {
-            w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-            logBuffer.WriteTo(w)
-        })
-    var wg sync.WaitGroup
-    wg.Add(1)
-    go func() {
-        wg.Done()
-        http.ListenAndServe(":6060", nil)
-    }()
-    wg.Wait()
-    log.Printf("One more line")
-    logBuffer.Close()
+    func main() {
+      logBuffer := circular.MakeBuffer(10 * 1024 * 1024)
+      defer func() {
+        // Flush ensures all readers have caught up.
+        logBuffer.Flush()
+        // Close gracefully closes the readers.
+        logBuffer.Close()
+      }()
+      f, err := os.OpenFile("app.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0666)
+      if err != nil {
+          panic(err)
+      }
+      defer f.Close()
 
+      // Send to both circular buffer and file.
+      log.SetOutput(io.MultiWriter(logBuffer, f))
 
-Asynchronous
-============
+      // Asynchronously write to stderr.
+      go logBuffer.WriteTo(os.Stderr)
 
-    import (
-      "log"
-      "os"
-      "sync"
+      log.Printf("This line is served over HTTP; file and stderr")
 
-      "github.com/maruel/circular"
-    )
-
-    // Saves the log to disk asynchrously. The main drawback, which is
-    // significant with this use-case, is that logs will be partially lost on
-    // panic().
-    logBuffer := MakeBuffer(10 * 1024 * 1024)
-    log.SetOutput(logBuffer)
-    log.Printf("This line is not lost")
-    f, err := os.OpenFile("app.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0666)
-    if err != nil {
-        panic(err)
+      http.HandleFunc("/",
+          func(w http.ResponseWriter, r *http.Request) {
+              w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+              // Streams the log buffer over HTTP until Close() is called.
+              logBuffer.WriteTo(w)
+          })
+      http.ListenAndServe(":6060", nil)
     }
-    var wg sync.WaitGroup
-    wg.Add(1)
-    go func() {
-        wg.Done()
-        logBuffer.WriteTo(f)
-    }()
-    wg.Wait()
-    // Will not be written.
-    log.Printf("One more line")
-    logBuffer.Close()
-    f.Close()
-
-
-Stderr
-======
-
-    import (
-      "log"
-      "os"
-      "sync"
-
-      "github.com/maruel/circular"
-    )
-
-    // Prints the content asynchronously to stderr in addition to keeping the
-    // log in memory.
-    logBuffer := MakeBuffer(10 * 1024 * 1024)
-    log.SetOutput(logBuffer)
-    log.Printf("This line is not lost")
-    var wg sync.WaitGroup
-    wg.Add(1)
-    go func() {
-        wg.Done()
-        logBuffer.WriteTo(os.Stderr)
-    }()
-    wg.Wait()
-    log.Printf("One more line")
-    logBuffer.Close()
-
-
-Synchronous
-===========
-
-    import (
-      "io"
-      "log"
-      "os"
-
-      "github.com/maruel/circular"
-    )
-    // Safely writes to disk synchronously in addition to keeping a circular
-    // buffer.
-    logBuffer := MakeBuffer(10 * 1024 * 1024)
-    log.SetOutput(logBuffer)
-    log.Printf("This line is lost!")
-    f, err := os.OpenFile("app.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0666)
-    if err != nil {
-        panic(err)
-    }
-    log.SetOutput(io.MultiWriter(logBuffer, f))
-    log.Printf("One more line")
-    logBuffer.Flush()
-    logBuffer.Close()
-    f.Close()

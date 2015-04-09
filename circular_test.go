@@ -21,134 +21,62 @@ import (
 	"github.com/maruel/ut"
 )
 
-func init() {
-	//log.SetOutput(ioutil.Discard)
-}
+func ExampleMakeBuffer() {
+	// Normally, use a larger buffer.
+	logBuffer := MakeBuffer(1024)
 
-func ExampleMakeBuffer_asynchronous() {
-	// Saves the log to disk asynchrously. The main drawback, which is
-	// significant with this use-case, is that logs will be partially lost on
-	// panic().
-	logBuffer := MakeBuffer(10 * 1024 * 1024)
-	log.SetFlags(0)
-	log.SetOutput(logBuffer)
-	log.Printf("This line is not lost")
-	f, err := os.OpenFile("app.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0666)
+	// Normally, use an actual file.
+	f, err := ioutil.TempFile("", "circular")
 	if err != nil {
 		panic(err)
 	}
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		wg.Done()
-		_, _ = logBuffer.WriteTo(f)
+	defer func() {
+		f.Close()
+		if err := os.Remove(f.Name()); err != nil {
+			panic(err)
+		}
 	}()
-	wg.Wait()
-	log.Printf("One more line")
-	logBuffer.Flush()
-	logBuffer.Close()
-	f.Close()
-	out, err := ioutil.ReadFile("app.log")
-	if err != nil {
-		panic(err)
-	}
-	_ = os.Remove("app.log")
-	_, _ = os.Stdout.Write(out)
-	// Output:
-	// This line is not lost
-	// One more line
-}
 
-func ExampleMakeBuffer_synchronous() {
-	// Safely writes to disk synchronously in addition to keeping a circular
-	// buffer.
-	logBuffer := MakeBuffer(10 * 1024 * 1024)
-	log.SetFlags(0)
-	log.SetOutput(logBuffer)
-	log.Printf("This line is lost!")
-	f, err := os.OpenFile("app.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0666)
-	if err != nil {
-		panic(err)
-	}
+	// Sends to both circular buffer and file.
 	log.SetOutput(io.MultiWriter(logBuffer, f))
-	log.Printf("One more line")
-	logBuffer.Close()
-	f.Close()
-	out, err := ioutil.ReadFile("app.log")
-	if err != nil {
-		panic(err)
-	}
-	_ = os.Remove("app.log")
-	_, _ = os.Stdout.Write(out)
-	// Output:
-	// One more line
-}
-
-func ExampleMakeBuffer_stdout() {
-	// Prints the content asynchronously to stdout or stderr in addition to
-	// keeping the log in memory.
-	logBuffer := MakeBuffer(10 * 1024 * 1024)
 	log.SetFlags(0)
-	log.SetOutput(logBuffer)
-	log.Printf("This line is not lost")
-	var wg sync.WaitGroup
-	wg.Add(1)
+
+	var wgDone sync.WaitGroup
+	wgDone.Add(1)
+
+	var wgReady sync.WaitGroup
+	wgReady.Add(1)
 	go func() {
-		wg.Done()
+		defer wgDone.Done()
+		// This has to be done otherwise this goroutine may not even have the
+		// chance of getting scheduled before the original function exits.
+		wgReady.Done()
+		// Asynchronously write to stdout. Normally, use os.Stderr.
 		_, _ = logBuffer.WriteTo(os.Stdout)
 	}()
-	wg.Wait()
-	// This one is lost, because there's no flush.
-	log.Printf("One more line")
-	logBuffer.Close()
-	// Output:
-	// This line is not lost
-}
 
-func ExampleMakeBuffer_stdout_flush() {
-	// Prints the content asynchronously to stdout or stderr in addition to
-	// keeping the log in memory.
-	logBuffer := MakeBuffer(10 * 1024 * 1024)
-	log.SetFlags(0)
-	log.SetOutput(logBuffer)
-	log.Printf("This line is not lost")
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		wg.Done()
-		_, _ = logBuffer.WriteTo(os.Stdout)
-	}()
-	wg.Wait()
-	// This one is lost, because there's no flush.
-	log.Printf("One more line")
-	logBuffer.Flush()
-	logBuffer.Close()
-	// Output:
-	// This line is not lost
-	// One more line
-}
+	log.Printf("This line is served over HTTP; file and stdout")
 
-func ExampleMakeBuffer_web() {
-	// Serves the circular log buffer over HTTP. This can be coupled with the
-	// other techniques.
-	logBuffer := MakeBuffer(10 * 1024 * 1024)
-	log.SetFlags(log.LstdFlags)
-	log.SetOutput(logBuffer)
-	log.Printf("This line is not lost")
-	http.HandleFunc("/",
-		func(w http.ResponseWriter, r *http.Request) {
+	server := &http.Server{
+		Addr: ":",
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-			_, _ = logBuffer.WriteTo(w)
-		})
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		wg.Done()
-		_ = http.ListenAndServe(":6060", nil)
-	}()
-	wg.Wait()
-	log.Printf("One more line")
+			// Streams the log buffer over HTTP until Close() is called.
+			logBuffer.WriteTo(w)
+		}),
+	}
+	go server.ListenAndServe()
+
+	wgReady.Wait()
+	// Flush ensures all readers have caught up.
+	logBuffer.Flush()
+	// Close gracefully closes the readers.
 	logBuffer.Close()
+
+	wgDone.Wait()
+
+	// Output:
+	// This line is served over HTTP; file and stdout
 }
 
 func TestBufferInternalState(t *testing.T) {
