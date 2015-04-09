@@ -14,7 +14,9 @@ import (
 )
 
 // CircularBuffer is the interface to a circular buffer. It can be written to
-// and read from.
+// and read from concurrently.
+//
+// It is expected that objects implementing this interface are thread-safe.
 type CircularBuffer interface {
 	// Close() aborts all WriteTo() streamers synchronously and blocks until they
 	// all quit. It also aborts in-progress Write() calls. Close() can safely be
@@ -53,9 +55,9 @@ type buffer struct {
 // MakeBuffer returns an initialized CircularBuffer.
 //
 // It is designed to keep recent logs in-memory efficiently and in a
-// thread-safe manner. No heap allocation is done within
-// CircularBuffer.Write(). Independent readers each have their read position
-// and are synchronized with the writer to not have any data loss.
+// thread-safe manner. No heap allocation is done within Write(). Independent
+// readers each have their read position and are synchronized with the writer
+// to not have any data loss.
 func MakeBuffer(size int) CircularBuffer {
 	return makeBuffer(size)
 }

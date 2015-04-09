@@ -39,6 +39,7 @@ func ExampleMakeBuffer() {
 
 	// Sends to both circular buffer and file.
 	log.SetOutput(io.MultiWriter(logBuffer, f))
+	// Normally remove this call. Used here so output can be verified below.
 	log.SetFlags(0)
 
 	var wgDone sync.WaitGroup
@@ -61,7 +62,9 @@ func ExampleMakeBuffer() {
 		Addr: ":",
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-			// Streams the log buffer over HTTP until Close() is called.
+			// Streams the log buffer over HTTP until Close() is called. Data is
+			// automatically flushed after a second. This is a trade-off about small
+			// TCP packets causing lots of I/O overhead vs delay.
 			_, _ = logBuffer.WriteTo(AutoFlush(w, time.Second))
 		}),
 	}
@@ -70,9 +73,13 @@ func ExampleMakeBuffer() {
 	}()
 
 	wgReady.Wait()
-	// Flush ensures all readers have caught up.
+
+	// <DO ACTUAL WORK>
+
+	// Flush ensures all readers have caught up before quitting.
 	logBuffer.Flush()
-	// Close gracefully closes the readers.
+	// Close gracefully closes the readers. This will properly TCP close the
+	// connections.
 	logBuffer.Close()
 
 	wgDone.Wait()
