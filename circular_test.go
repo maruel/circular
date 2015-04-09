@@ -235,7 +235,7 @@ func TestBufferFlusher(t *testing.T) {
 
 	end.Go(func() {
 		wgReady.Done()
-		n, err := b.WriteTo(AutoFlushInstant(w))
+		n, err := b.WriteTo(AutoFlush(w, 0))
 		ut.AssertEqual(t, int64(7), n)
 		ut.AssertEqual(t, io.EOF, err)
 		ut.AssertEqual(t, "abcdefg", w.buf.String())
@@ -262,7 +262,7 @@ func TestBufferFlusherRolledOver(t *testing.T) {
 
 	end.Go(func() {
 		wgReady.Done()
-		n, err := b.WriteTo(AutoFlushInstant(w))
+		n, err := b.WriteTo(AutoFlush(w, 0))
 		ut.AssertEqual(t, int64(25), n)
 		ut.AssertEqual(t, io.EOF, err)
 		ut.AssertEqual(t, "abcdefghijklmnopqrstuvwxy", w.buf.String())
@@ -418,7 +418,7 @@ func TestBufferWriteClosedPipe(t *testing.T) {
 	w.hang.Add(1)
 	end.Go(func() {
 		s.Step(0)
-		n, err := b.WriteTo(AutoFlushInstant(w))
+		n, err := b.WriteTo(AutoFlush(w, 0))
 		// Never gets to write anything due to hang.
 		ut.AssertEqual(t, int64(5), n)
 		ut.AssertEqual(t, io.EOF, err)
@@ -448,14 +448,14 @@ func TestBufferReaderLaggard(t *testing.T) {
 	end.Go(func() {
 		// This one hangs.
 		s.Step(0)
-		n, err := b.WriteTo(AutoFlushInstant(&w[0]))
+		n, err := b.WriteTo(AutoFlush(&w[0], 0))
 		ut.AssertEqual(t, "bcdefghijklmnopqrst", w[0].buf.String())
 		ut.AssertEqual(t, int64(19), n)
 		ut.AssertEqual(t, io.EOF, err)
 	})
 	end.Go(func() {
 		s.Step(1)
-		n, err := b.WriteTo(AutoFlushInstant(&w[1]))
+		n, err := b.WriteTo(AutoFlush(&w[1], 0))
 		ut.AssertEqual(t, "bcdefghijklmnopqrstu", w[1].buf.String())
 		ut.AssertEqual(t, int64(20), n)
 		ut.AssertEqual(t, io.EOF, err)

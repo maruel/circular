@@ -10,7 +10,9 @@ import (
 	"time"
 )
 
-type AutoFlusher interface {
+// WriteFlusher is a io.Writer that can also be flushed. It is compatible with
+// http.Flusher.
+type WriteFlusher interface {
 	io.Writer
 
 	Flush()
@@ -19,17 +21,15 @@ type AutoFlusher interface {
 // AutoFlush converts an io.Writer supporting http.Flusher to call Flush()
 // automatically after each write after a small delay.
 //
+// To flush after each Write() call, pass 0 as delay.
+//
 // The main use case is http connection when piping a circular buffer to it.
-func AutoFlush(w io.Writer, delay time.Duration) AutoFlusher {
+func AutoFlush(w io.Writer, delay time.Duration) WriteFlusher {
 	f, _ := w.(flusher)
 	if f == nil {
 		return noOpFlush{w}
 	}
 	return &autoFlusher{w: w, f: f, delay: delay}
-}
-
-func AutoFlushInstant(w io.Writer) AutoFlusher {
-	return AutoFlush(w, time.Duration(0))
 }
 
 // Internal details.
