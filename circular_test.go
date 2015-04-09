@@ -62,10 +62,12 @@ func ExampleMakeBuffer() {
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 			// Streams the log buffer over HTTP until Close() is called.
-			logBuffer.WriteTo(w)
+			_, _ = logBuffer.WriteTo(w)
 		}),
 	}
-	go server.ListenAndServe()
+	go func() {
+		_ = server.ListenAndServe()
+	}()
 
 	wgReady.Wait()
 	// Flush ensures all readers have caught up.
