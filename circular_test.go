@@ -21,9 +21,9 @@ import (
 	"github.com/maruel/ut"
 )
 
-func ExampleMakeBuffer() {
+func ExampleNew() {
 	// Normally, use a larger buffer.
-	logBuffer := MakeBuffer(1024)
+	logBuffer := New(1024)
 
 	// Normally, use an actual file.
 	f, err := ioutil.TempFile("", "circular")
@@ -105,7 +105,7 @@ func TestBufferInternalState(t *testing.T) {
 		{"Overly long string", "g stringon"},
 	}
 	bytesWritten := 0
-	b := makeBuffer(10)
+	b := newBuffer(10)
 	for i, item := range data {
 		writeOk(t, b, item.written)
 		bytesWritten += len(item.written)
@@ -115,7 +115,7 @@ func TestBufferInternalState(t *testing.T) {
 }
 
 func TestBufferNoHangOnFail(t *testing.T) {
-	b := MakeBuffer(10)
+	b := New(10)
 	writeOk(t, b, "hello")
 	actualErr := errors.New("Failed")
 	// Returns immediately.
@@ -125,11 +125,11 @@ func TestBufferNoHangOnFail(t *testing.T) {
 }
 
 func TestBufferZero(t *testing.T) {
-	ut.AssertEqual(t, (*buffer)(nil), MakeBuffer(0))
+	ut.AssertEqual(t, (*buffer)(nil), New(0))
 }
 
 func TestBufferEOF(t *testing.T) {
-	b := MakeBuffer(10)
+	b := New(10)
 	writeOk(t, b, "Hello")
 	actualErr := errors.New("Failed")
 	n, err := b.WriteTo(&failWriter{actualErr})
@@ -138,13 +138,13 @@ func TestBufferEOF(t *testing.T) {
 }
 
 func TestBufferClosedTwice(t *testing.T) {
-	b := MakeBuffer(10)
+	b := New(10)
 	ut.AssertEqual(t, nil, b.Close())
 	ut.AssertEqual(t, io.ErrClosedPipe, b.Close())
 }
 
 func TestBufferClosedWrite(t *testing.T) {
-	b := MakeBuffer(10)
+	b := New(10)
 	ut.AssertEqual(t, nil, b.Close())
 	n, err := b.Write([]byte("foo"))
 	ut.AssertEqual(t, 0, n)
@@ -152,7 +152,7 @@ func TestBufferClosedWrite(t *testing.T) {
 }
 
 func TestBufferClosedWriteTo(t *testing.T) {
-	b := MakeBuffer(10)
+	b := New(10)
 	ut.AssertEqual(t, nil, b.Close())
 	n, err := b.WriteTo(&bytes.Buffer{})
 	ut.AssertEqual(t, int64(0), n)
@@ -160,7 +160,7 @@ func TestBufferClosedWriteTo(t *testing.T) {
 }
 
 func TestBufferWriteLock(t *testing.T) {
-	b := makeBuffer(10)
+	b := newBuffer(10)
 	var end End
 	var ready sync.WaitGroup
 	b.writerLock.Lock()
@@ -179,7 +179,7 @@ func TestBufferWriteLock(t *testing.T) {
 
 func TestBufferRolledOver(t *testing.T) {
 	var end End
-	b := makeBuffer(10)
+	b := newBuffer(10)
 	buffer := &bytes.Buffer{}
 	writeOk(t, b, "abcdefghijklmnopqr")
 	ut.AssertEqual(t, "klmnopqrij", string(b.buf))
@@ -200,7 +200,7 @@ func TestBufferRolledOver(t *testing.T) {
 }
 
 func TestBufferReaders(t *testing.T) {
-	b := MakeBuffer(10)
+	b := New(10)
 	// TODO(maruel): Create state machine to ensure all possible race conditions
 	// are addressed.
 	buffers := [2]bytes.Buffer{}
@@ -234,7 +234,7 @@ func TestBufferReaders(t *testing.T) {
 
 func TestBufferFlusher(t *testing.T) {
 	var end End
-	b := MakeBuffer(10)
+	b := New(10)
 	w := &flusherWriter{}
 	var wgReady sync.WaitGroup
 	wgReady.Add(1)
@@ -258,7 +258,7 @@ func TestBufferFlusher(t *testing.T) {
 
 func TestBufferFlusherRolledOver(t *testing.T) {
 	var end End
-	b := MakeBuffer(10)
+	b := New(10)
 	writeOk(t, b, "abcde")
 	writeOk(t, b, "fghij")
 	w := &flusherWriter{}
@@ -287,7 +287,7 @@ func TestBufferWriteClosed(t *testing.T) {
 	// called, causing Write() to abort early.
 	s := makeSequence(10)
 	var end End
-	b := MakeBuffer(10)
+	b := New(10)
 	h := &hookWriter{
 		f: []func(){
 			func() {
@@ -324,7 +324,7 @@ func TestBufferWriteClosed(t *testing.T) {
 }
 
 func TestBufferFlushEmpty(t *testing.T) {
-	b := MakeBuffer(10)
+	b := New(10)
 	b.Flush()
 	ut.AssertEqual(t, nil, b.Close())
 	b.Flush()
@@ -333,7 +333,7 @@ func TestBufferFlushEmpty(t *testing.T) {
 func TestBufferFlushBlocking(t *testing.T) {
 	var end End
 	s := makeSequence(6)
-	b := MakeBuffer(10)
+	b := New(10)
 	writeOk(t, b, "abcde")
 	end.Go(func() {
 		h := &hookWriter{
@@ -375,7 +375,7 @@ func stressTest(t *testing.T, s string, maker func() io.ReadWriter) {
 	var endWriters End
 	wgStart.Add(1)
 
-	b := MakeBuffer(10)
+	b := New(10)
 	// Create same number of readers and writers.
 	readers := make([]io.ReadWriter, ConcurrentRacers)
 	for i := range readers {
@@ -418,7 +418,7 @@ func TestBufferWriteClosedPipe(t *testing.T) {
 	// Close while Write() is stuck due to an hung Flush().
 	var end End
 	s := makeSequence(3)
-	b := MakeBuffer(10)
+	b := New(10)
 	w := &flusherWriterHang{}
 	// Misallign the buffer in the middle.
 	writeOk(t, b, "abcde")
@@ -448,7 +448,7 @@ func TestBufferReaderLaggard(t *testing.T) {
 	// Synthetically makes a reader a laggard, close while still writing.
 	var end End
 	s := makeSequence(6)
-	b := makeBuffer(10)
+	b := newBuffer(10)
 	w := [2]flusherWriterHang{}
 	writeOk(t, b, "abcdefghijk")
 	w[0].hang.Add(1)

@@ -38,7 +38,7 @@ panic() output itself is only written to stderr since it uses print() builtin.
     )
 
     func main() {
-      logBuffer := circular.MakeBuffer(10 * 1024 * 1024)
+      logBuffer := circular.New(10 * 1024 * 1024)
       defer func() {
         // Flush ensures all readers have caught up.
         logBuffer.Flush()

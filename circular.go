@@ -13,11 +13,11 @@ import (
 	"sync/atomic"
 )
 
-// CircularBuffer is the interface to a circular buffer. It can be written to
-// and read from concurrently.
+// Buffer is the interface to a circular buffer. It can be written to and read
+// from concurrently.
 //
 // It is expected that objects implementing this interface are thread-safe.
-type CircularBuffer interface {
+type Buffer interface {
 	// Close() aborts all WriteTo() streamers synchronously and blocks until they
 	// all quit. It also aborts in-progress Write() calls. Close() can safely be
 	// called in a reentrant context, as it doesn't use any lock.
@@ -52,17 +52,17 @@ type buffer struct {
 	buf        []byte        // The data itself.
 }
 
-// MakeBuffer returns an initialized CircularBuffer.
+// New returns an initialized Buffer.
 //
 // It is designed to keep recent logs in-memory efficiently and in a
 // thread-safe manner. No heap allocation is done within Write(). Independent
 // readers each have their read position and are synchronized with the writer
 // to not have any data loss.
-func MakeBuffer(size int) CircularBuffer {
-	return makeBuffer(size)
+func New(size int) Buffer {
+	return newBuffer(size)
 }
 
-func makeBuffer(size int) *buffer {
+func newBuffer(size int) *buffer {
 	if size <= 0 {
 		return nil
 	}
