@@ -168,8 +168,8 @@ func TestBufferWriteLock(t *testing.T) {
 	end.Go(func() {
 		ready.Done()
 		n, err := b.Write([]byte("Hello"))
-		ut.AssertEqual(t, 0, n)
-		ut.AssertEqual(t, io.ErrClosedPipe, err)
+		ut.ExpectEqual(t, 0, n)
+		ut.ExpectEqual(t, io.ErrClosedPipe, err)
 	})
 	ready.Wait()
 	ut.AssertEqual(t, nil, b.Close())
@@ -189,8 +189,8 @@ func TestBufferRolledOver(t *testing.T) {
 	end.Go(func() {
 		wg.Done()
 		n, err := b.WriteTo(buffer)
-		ut.AssertEqual(t, int64(10), n)
-		ut.AssertEqual(t, io.EOF, err)
+		ut.ExpectEqual(t, int64(10), n)
+		ut.ExpectEqual(t, io.EOF, err)
 	})
 	wg.Wait()
 	writeOk(t, b, "stu")
@@ -214,8 +214,8 @@ func TestBufferReaders(t *testing.T) {
 			defer wgEnd.Done()
 			wgReady.Done()
 			n, err := b.WriteTo(&buffers[j])
-			ut.AssertEqual(t, int64(20), n)
-			ut.AssertEqual(t, io.EOF, err)
+			ut.ExpectEqual(t, int64(20), n)
+			ut.ExpectEqual(t, io.EOF, err)
 		}(i)
 	}
 
@@ -243,9 +243,9 @@ func TestBufferFlusher(t *testing.T) {
 	end.Go(func() {
 		wgReady.Done()
 		n, err := b.WriteTo(AutoFlush(w, 0))
-		ut.AssertEqual(t, int64(7), n)
-		ut.AssertEqual(t, io.EOF, err)
-		ut.AssertEqual(t, "abcdefg", w.buf.String())
+		ut.ExpectEqual(t, int64(7), n)
+		ut.ExpectEqual(t, io.EOF, err)
+		ut.ExpectEqual(t, "abcdefg", w.buf.String())
 	})
 
 	writeOk(t, b, "abcde")
@@ -270,9 +270,9 @@ func TestBufferFlusherRolledOver(t *testing.T) {
 	end.Go(func() {
 		wgReady.Done()
 		n, err := b.WriteTo(AutoFlush(w, 0))
-		ut.AssertEqual(t, int64(25), n)
-		ut.AssertEqual(t, io.EOF, err)
-		ut.AssertEqual(t, "abcdefghijklmnopqrstuvwxy", w.buf.String())
+		ut.ExpectEqual(t, int64(25), n)
+		ut.ExpectEqual(t, io.EOF, err)
+		ut.ExpectEqual(t, "abcdefghijklmnopqrstuvwxy", w.buf.String())
 	})
 
 	wgReady.Wait()
@@ -312,7 +312,7 @@ func TestBufferWriteClosed(t *testing.T) {
 
 	end.Go(func() {
 		s.Step(5)
-		ut.AssertEqual(t, nil, b.Close())
+		ut.ExpectEqual(t, nil, b.Close())
 		s.Step(7)
 	})
 
@@ -388,8 +388,8 @@ func stressTest(t *testing.T, s string, maker func() io.ReadWriter) {
 			defer endReaders.Done()
 			wgReady.Done()
 			n, err := b.WriteTo(AutoFlush(readers[j], 1*time.Millisecond))
-			ut.AssertEqual(t, int64(len(s)*len(readers)), n)
-			ut.AssertEqual(t, io.EOF, err)
+			ut.ExpectEqual(t, int64(len(s)*len(readers)), n)
+			ut.ExpectEqual(t, io.EOF, err)
 		}(i)
 
 		wgReady.Add(1)
@@ -427,16 +427,16 @@ func TestBufferWriteClosedPipe(t *testing.T) {
 		s.Step(0)
 		n, err := b.WriteTo(AutoFlush(w, 0))
 		// Never gets to write anything due to hang.
-		ut.AssertEqual(t, int64(5), n)
-		ut.AssertEqual(t, io.EOF, err)
+		ut.ExpectEqual(t, int64(5), n)
+		ut.ExpectEqual(t, io.EOF, err)
 	})
 	end.Go(func() {
 		s.Step(1)
 		// 12 is larger than the size of the buffer.
 		n, err := b.Write([]byte("fghijklmnopq"))
 		// 2 bytes are lost.
-		ut.AssertEqual(t, 10, n)
-		ut.AssertEqual(t, io.ErrClosedPipe, err)
+		ut.ExpectEqual(t, 10, n)
+		ut.ExpectEqual(t, io.ErrClosedPipe, err)
 	})
 	s.Step(2)
 	w.hang.Done()
@@ -456,22 +456,22 @@ func TestBufferReaderLaggard(t *testing.T) {
 		// This one hangs.
 		s.Step(0)
 		n, err := b.WriteTo(AutoFlush(&w[0], 0))
-		ut.AssertEqual(t, "bcdefghijklmnopqrst", w[0].buf.String())
-		ut.AssertEqual(t, int64(19), n)
-		ut.AssertEqual(t, io.EOF, err)
+		ut.ExpectEqual(t, "bcdefghijklmnopqrst", w[0].buf.String())
+		ut.ExpectEqual(t, int64(19), n)
+		ut.ExpectEqual(t, io.EOF, err)
 	})
 	end.Go(func() {
 		s.Step(1)
 		n, err := b.WriteTo(AutoFlush(&w[1], 0))
-		ut.AssertEqual(t, "bcdefghijklmnopqrstu", w[1].buf.String())
-		ut.AssertEqual(t, int64(20), n)
-		ut.AssertEqual(t, io.EOF, err)
+		ut.ExpectEqual(t, "bcdefghijklmnopqrstu", w[1].buf.String())
+		ut.ExpectEqual(t, int64(20), n)
+		ut.ExpectEqual(t, io.EOF, err)
 	})
 	end.Go(func() {
 		s.Step(2)
 		n, err := b.Write([]byte("lmnopqrstuvwxyzABC"))
-		ut.AssertEqual(t, 10, n)
-		ut.AssertEqual(t, io.ErrClosedPipe, err)
+		ut.ExpectEqual(t, 10, n)
+		ut.ExpectEqual(t, io.ErrClosedPipe, err)
 	})
 	s.Step(3)
 	// Spuriously wake up the Writer. This is to exercise the loop in Write()
@@ -479,7 +479,7 @@ func TestBufferReaderLaggard(t *testing.T) {
 	b.readers.broadcast()
 	end.Go(func() {
 		s.Step(4)
-		ut.AssertEqual(t, nil, b.Close())
+		ut.ExpectEqual(t, nil, b.Close())
 	})
 	end.Go(func() {
 		s.Step(5)
@@ -493,8 +493,8 @@ func TestBufferReaderLaggard(t *testing.T) {
 // writeOk writes and ensures write succeeded.
 func writeOk(t *testing.T, w io.Writer, s string) {
 	n, err := w.Write([]byte(s))
-	ut.AssertEqual(t, len(s), n)
-	ut.AssertEqual(t, nil, err)
+	ut.ExpectEqual(t, len(s), n)
+	ut.ExpectEqual(t, nil, err)
 }
 
 // failWriter fails all writes.
